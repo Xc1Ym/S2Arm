@@ -28,7 +28,9 @@ class EngineHealTests(JobCase):
             (self.bundle / rel).write_bytes(body)
         env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1", GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
                    GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
-        for args in (["init", "-q", "--template="], ["add", "pack"], ["commit", "-qm", "fixture"]):
+        # 清单包含 .git：禁用后台自动维护，避免提交返回后把短命的 maintenance.lock 收进不可变快照。
+        for args in (["init", "-q", "--template="], ["config", "maintenance.auto", "false"],
+                     ["add", "pack"], ["commit", "-qm", "fixture"]):
             subprocess.run(["git", "-C", str(self.bundle), *args], env=env, check=True, stdout=subprocess.DEVNULL)
         files = {p.relative_to(self.bundle).as_posix(): [p.stat().st_size, hashlib.sha256(p.read_bytes()).hexdigest()]
                  for p in self.bundle.rglob("*") if p.is_file() and not p.is_symlink()}
