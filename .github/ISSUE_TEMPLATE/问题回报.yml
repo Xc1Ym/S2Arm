@@ -1,6 +1,6 @@
 name: 问题回报
 description: 游戏打不开、画面不对、卡顿发热、出包失败……都用这个模板。填得越全，修得越快。
-title: "[问题] 游戏名：一句话现象"
+title: "[问题] "
 labels: ["bug"]
 body:
   - type: markdown
@@ -13,6 +13,14 @@ body:
       label: 游戏名与版本
       description: 游戏名 + 版本号（Mac 前端游戏详情里能看到，例如「1.0.34.0」）。知道 Title ID（16 位，例如 0100726014352000）也请填上。
       placeholder: 暗黑破坏神 2 重制版 1.0.34.0（0100726014352000）
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: S2Arm 版本
+      description: 电脑上启动器「关于」里的版本号（例如 0.2.2）；只用一键出包命令的，填出包结束时打印的包号。
+      placeholder: 0.2.2
     validations:
       required: true
   - type: dropdown
@@ -42,8 +50,10 @@ body:
     id: device
     attributes:
       label: 设备型号与系统版本
-      description: 诊断包里已带，导不出诊断包时再填。iPhone / iPad 在「设置 → 通用 → 关于本机」查看；Mac 在「 → 关于本机」查看。
+      description: 诊断包里也有，但请在这里写一句方便分诊。iPhone / iPad 在「设置 → 通用 → 关于本机」查看；Mac 在「 → 关于本机」查看。
       placeholder: iPhone 17 Pro Max，iOS 27.0.1
+    validations:
+      required: true
   - type: dropdown
     id: install
     attributes:

@@ -36,7 +36,7 @@ def snapshot(c, root):
     第二项留空串，旧清单的摘要照旧读得进来、不再比对）。软链由 clone_tree 拷的时候就拒了，这里不再重复"""
     result = {}
     for p in sorted(root.rglob("*")):
-        if p.is_file():
+        if p.is_file() and not layout.os_junk(p.name):   # 访达 .DS_Store / ._ 等系统文件不进清单：出包期间会被写入 / 改动 / 删掉（#382）
             c.check()
             result[str(p.relative_to(root))] = [p.stat().st_size, ""]
     return result
@@ -61,6 +61,8 @@ def validate_files(c, root, files, full=False):
     dirs = {}
     for name, expected in files.items():
         c.check()
+        if layout.os_junk(Path(name).name):   # 旧清单里记进去的系统文件（#382 之前 snapshot 没过滤）：不核，访达随时会改它
+            continue
         p = root / name
         if p.parent not in dirs:
             dirs[p.parent] = contained(root, p.parent) if p.parent != root else root

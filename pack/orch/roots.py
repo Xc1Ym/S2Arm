@@ -269,9 +269,16 @@ def remove_owned(path):
             _win_acl(path, False)
         else:
             path.chmod(stat.S_IMODE(path.stat().st_mode) | 0o700)
-        for p in path.iterdir():
-            remove_owned(p)
-        path.rmdir()
+        for attempt in range(5):   # 删的同时目录里又被写进文件（外置盘访达 .DS_Store / ._ 等，#369）：重列再删
+            for p in path.iterdir():
+                remove_owned(p)
+            try:
+                path.rmdir()
+                break
+            except OSError as e:
+                if e.errno != errno.ENOTEMPTY or attempt == 4:
+                    raise
+                time.sleep(0.2 * (attempt + 1))
     elif path.exists():
         if os.name == 'nt':
             _win_acl(path, False)

@@ -39,6 +39,17 @@ class HashDedupe(JobCase):
         atomic(pack / "manifest.json", {"version": 2, "index_sha256": "ab"})
         self.assertEqual(install.ios_pack(self.c, gid), pack)
 
+    def test_finder_junk_never_fails_validation(self):   # #382：清单不记 .DS_Store / ._；生成后访达写入 / 改动 / 删掉它都不判红；旧清单里记着的也不核
+        root = self.root / "img2"; (root / "romfs").mkdir(parents=True); (root / "romfs" / "a.bin").write_bytes(b"abc")
+        (root / "romfs" / ".DS_Store").write_bytes(b"x" * 10); (root / "romfs" / "._a.bin").write_bytes(b"y")
+        snap = build.snapshot(self.c, root)
+        self.assertEqual(snap, {"romfs/a.bin": [3, ""]})
+        (root / "romfs" / ".DS_Store").write_bytes(b"changed size")
+        build.validate_files(self.c, root, snap)
+        old = dict(snap, **{"romfs/.DS_Store": [10, ""]})   # 旧清单记过、现在被访达删掉
+        (root / "romfs" / ".DS_Store").unlink()
+        build.validate_files(self.c, root, old)
+
 
 if __name__ == "__main__":
     unittest.main()

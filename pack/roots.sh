@@ -150,17 +150,27 @@ _root_romfs_seal() {
 #   root_commit 在持提交锁时调（审计 #1508 P1-108：原先放锁后清扫，名单拍下之后并行阶段拿锁收纳的新身份不在名单里、被删，现行 romfs 断链）；
 #   删每个身份前再读一次全部版本链接，名单之后新出现的指向照样算
 _root_romfs_used() { local d; for d in "$S2A_ROOTS/$1"@*; do [ ! -L "$d/romfs" ] || readlink "$d/romfs"; done; }
+#   一律持这一款的提交锁清（root_commit 里调时已持锁就不再拿；单独调的自己拿，最多等 600 秒，拿不到这一款跳过、一个不删）：
+#   原先单独调的清扫不拿锁，只靠「删前再读一次链接」防并发的收纳——再读时按 g@* 列版本再逐个读链接，并发的提交恰好把 g@<标签>.tmp 改名成
+#   g@<标签>，两个名字都没列到，刚收纳的新身份被当成无主删掉、现行 romfs 读不到（tests/roots_romfs_sweep_race_test.sh 满载下偶发红，
+#   测试按事件把这一刻钉住后旧码必红）。与收纳、提交同一把锁串行就没有这个空当
 root_romfs_sweep() {
-  local base=$S2A_ROOTS/$_ROOT_STORE g d used
+  local base=$S2A_ROOTS/$_ROOT_STORE g d used held
   [ -d "$base" ] || return 0
   [ $# -gt 0 ] || set -- $(ls "$base")
   for g in "$@"; do [ -d "$base/$g" ] || continue
+    held=
+    if [ -z "$_ROOT_LOCK_PID" ] || [ "${_ROOT_LOCK_GAME:-}" != "$g" ]; then
+      type plock_take > /dev/null 2>&1 || source "$(dirname "${BASH_SOURCE[0]}")/../tools/plock.sh" || return 1
+      PLOCK_POLL_S=0.2 plock_take "$S2A_ROOTS/.$g.commit.lock" 600 || { echo "【黄】$g RomFS 清扫拿不到提交锁（持有者 pid $(plock_holder "$S2A_ROOTS/.$g.commit.lock")），这次不清" >&2; continue; }
+      held=$PLOCK_PID
+    fi
     used=$(_root_romfs_used "$g")
     for d in "$base/$g"/*; do [ -d "$d" ] && [ ! -L "$d" ] || continue
       grep -qxF -- "../$_ROOT_STORE/$g/${d##*/}" <<< "$used" && continue
-      grep -qxF -- "../$_ROOT_STORE/$g/${d##*/}" <<< "$(_root_romfs_used "$g")" && continue
       _root_rm "$d" && echo "删 RomFS 存储 ${d}（没有版本再指向它）" >&2; done
-    rmdir "$base/$g" 2> /dev/null || :; done
+    rmdir "$base/$g" 2> /dev/null || :
+    [ -z "$held" ] || plock_release "$held"; done
   rmdir "$base" 2> /dev/null || :; return 0
 }
 # 取现行时顺手「钉」住它（11-02 体验线 Tools Up! 一键出包：刷新的 aoc / sysdata 阶段连续 commit 两次，root_commit 的「只留现行 + 上一版」把改写阶段刚取到、正在读的
@@ -221,14 +231,14 @@ root_begin() {
 }
 _root_shards() {   # _root_shards <目录> <标签>：记一行直连库分片清点（11-01 究极4 分片丢在出包之后某步，要能定位）；记不成不影响提交。日志 ${S2A_SHARD_LOG}（缺省 ${S2A_ROOTS}/.shard_inventory.log）
   python3 "$(dirname "${BASH_SOURCE[0]}")/../tools/direct_shards.py" inventory "$1" --label "$2" --log "${S2A_SHARD_LOG:-${S2A_ROOTS:-/dev/null/x}/.shard_inventory.log}" > /dev/null 2>&1 || true; }
-_ROOT_LOCK_PID=
+_ROOT_LOCK_PID=; _ROOT_LOCK_GAME=
 _root_lock() {   # 同一款的提交串行：内核文件锁（tools/plock.sh，审计 P1-27：原先 mkdir + 判 pid 死就删，读 → 判 → 删之间别人可能已接手）；持锁者 = 本（子）shell，退出即放
   # 用到才 source（同本文件调 ../tools/clonedir.py）：调度器冻结的 sched/auto/tools_<提交>/ 里 roots.sh 与 tools 平铺，只用不提交产物根的函数
   type plock_take > /dev/null 2>&1 || source "$(dirname "${BASH_SOURCE[0]}")/../tools/plock.sh" || return 1
   PLOCK_POLL_S=0.2 plock_take "$S2A_ROOTS/.$1.commit.lock" 86400 || { echo "【红】$1 拿不到产物根提交锁（$S2A_ROOTS/.$1.commit.lock，持有者 pid $(plock_holder "$S2A_ROOTS/.$1.commit.lock")）" >&2; return 1; }
-  _ROOT_LOCK_PID=$PLOCK_PID
+  _ROOT_LOCK_PID=$PLOCK_PID; _ROOT_LOCK_GAME=$1
 }
-_root_unlock() { plock_release "$_ROOT_LOCK_PID"; _ROOT_LOCK_PID=; }
+_root_unlock() { plock_release "$_ROOT_LOCK_PID"; _ROOT_LOCK_PID=; _ROOT_LOCK_GAME=; }
 _root_replay() {   # _root_replay <W.tmp> <新现行> <路径…>：新现行克隆一份，按本阶段声明的路径换成 W 里的，结果放回 W.tmp
   #   !<路径>：声明路径里套着的、别的阶段的产物（着色器阶段的 shaders/ 里有直连阶段的 shaders/direct）——换完之后这一块恢复成新现行的。
   #   10-25 测试设备1 马车8：着色器阶段提交时把整个 shaders/ 换成开工时克隆的那份，烘的几分钟里直连阶段刚提交的新库被退回旧版
@@ -247,12 +257,12 @@ _root_replay() {   # _root_replay <W.tmp> <新现行> <路径…>：新现行克
   _root_shards "$r" "replay·克隆新现行"
   for p in "$@"; do case $p in '!'*) continue;; esac
     case " $mvp " in *" $p "*) [ -e "$w/$p" ] || [ -L "$w/$p" ] || continue; mv "$w/$p" "$r/$p" || { _root_rm "$r"; return 1; }; continue;; esac   # 上面克隆时跳过的：整个挪过来
-    ( cd "$r" && shopt -s nullglob dotglob && for m in $p; do [ -L "$m" ] || chmod -R u+w "$m" 2> /dev/null; rm -rf -- "$m"; done ) || return 1
+    ( cd "$r" && shopt -s nullglob dotglob && for m in $p; do _root_rm "$m"; done ) || return 1   # 走 _root_rm：删的同时被写进系统文件也删得掉（#369）
     # 不带通配的字面路径 W 里没有 = 本阶段删了它；复制失败必须中止，不能提交缺失的产物。
     ( cd "$w" && shopt -s nullglob dotglob && for m in $p; do [ -e "$m" ] || continue; mkdir -p "$r/$(dirname "$m")" && _root_cp -R "$m" "$r/$m" || exit 1; done ) || { _root_rm "$r"; return 1; }
   done
   for p in "$@"; do case $p in '!'*) p=${p#!};; *) continue;; esac
-    ( cd "$r" && { [ -L "$p" ] || chmod -R u+w "$p" 2> /dev/null; }; rm -rf -- "$p"; [ -e "$now/$p" ] || exit 0; mkdir -p "$(dirname "$p")" && _root_cp -R "$now/$p" "$p" ) || { _root_rm "$r"; return 1; }
+    ( cd "$r" && _root_rm "$p"; [ -e "$now/$p" ] || exit 0; mkdir -p "$(dirname "$p")" && _root_cp -R "$now/$p" "$p" ) || { _root_rm "$r"; return 1; }
   done
   # 来源提交取两边较新的：新现行来自更新的 main 时留它的（旧树重放一个没被动过的阶段，不把共享现行的来源退回旧提交）
   local ns ms; ns=$(cat "$r/.root_src" 2> /dev/null); ms=$(cat "$w/.root_src" 2> /dev/null)

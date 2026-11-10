@@ -4203,6 +4203,8 @@ static void tess_stat_line(uint64_t frame);   // S2Arm tessellation: 曲面画�
 static void nvn_mem_detail(unsigned long long frame);   // DM_NVN_MEM_DETAIL, defined with mtl_res_snapshot below (it needs the shader / pipeline / archive tables)
 static void fb_report(uint64_t frame);   // same-pass feedback sampling counts (defined with fb_prepare)
 static void samp_report(uint64_t frame);   // sampler IDs registered again with another state (defined with nvn_be_reg_samp)
+// Metal allocation size of a texture / buffer object held in a table (0 for anything else); for the memory report (#357)
+static uint64_t res_bytes(id o) { return [o conformsToProtocol:@protocol(MTLResource)] ? (uint64_t)((id<MTLResource>)o).allocatedSize : 0; }
 static uint64_t g_wd_ts_tbuf, g_wd_ts_tbuf_scaled, g_tb2_inexact;   // 取图倍率落在缓冲贴图上的条目数 / 其中倍率不为 1 的（widen_glue.inc wd_tex_scales_locked 计，诊断）；精确 2D 行形式放不下、退回固定行的次数（tbuf_as_2d）
 static void audit_probe_report(uint64_t frame);   // audit #1534 passive probes P1-65 / P1-23 / P1-20 (defined after encode_args)
 // 我方按种类的字节（S2A_MEM_SPLIT 跳变行，ios/app.m 的 100 ms 采样线程调；任意线程可调）：驻留集里的对象逐个分类——
@@ -4244,10 +4246,13 @@ void nvn_be_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
     int live = 0, peak = 0, cap = 0; nvn_dirty_stat(&live, &peak, &cap);
     pthread_mutex_lock(&g_smu); unsigned ns = g_by_serial.n, ashared = g_alias.n, nghost = g_ghost.n; uint64_t ghost_puts = g_ghost_puts, ghost_kept = g_ghost_kept, ghost_shared = g_ghost_shared;
     unsigned aorph = 0;   // shared textures no live texture object or finalized serial resolves to: kept only until their storage is taken over or their pool goes (alias_take_over)
+    // #357: their Metal allocation sizes too (iPad 7.5 GB: the low address region Metal allocates in ran out with 339 of 399 shared textures unreferenced, sizes unknown)
+    uint64_t ser_b = 0, ash_b = 0, aorph_b = 0, aorph_w = 0;
     { CFMutableSetRef held = CFSetCreateMutable(NULL, 0, NULL);
-      for (uint32_t i = 0; i < g_by_serial.cap; i++) if (g_by_serial.vals[i]) CFSetAddValue(held, g_by_serial.vals[i]);
+      for (uint32_t i = 0; i < g_by_serial.cap; i++) if (g_by_serial.vals[i] && !CFSetContainsValue(held, g_by_serial.vals[i])) { CFSetAddValue(held, g_by_serial.vals[i]); ser_b += res_bytes((__bridge id)g_by_serial.vals[i]); }
       for (uint32_t i = 0; i < g_ghost.cap; i++) if (g_ghost.vals[i]) CFSetAddValue(held, g_ghost.vals[i]);
-      for (uint32_t i = 0; i < g_alias.cap; i++) if (g_alias.vals[i] && !CFSetContainsValue(held, g_alias.vals[i])) aorph++;
+      for (uint32_t i = 0; i < g_alias.cap; i++) if (g_alias.vals[i]) { uint64_t b = res_bytes((__bridge id)g_alias.vals[i]); ash_b += b;
+          if (!CFSetContainsValue(held, g_alias.vals[i])) { aorph++; aorph_b += b; if (nvn_hm_get(&g_alias_wrote, g_alias.keys + (size_t)i * g_alias.klen)) aorph_w += b; } }   // GPU-written: holds content the pool memory lacks
       CFRelease(held); }
     pthread_mutex_unlock(&g_smu);
     unsigned long dead_n = 0; unsigned long long dead_mb = 0;
@@ -4258,7 +4263,7 @@ void nvn_be_mem_stat(unsigned long long frame, unsigned long long rss_mb) {
 #if TARGET_OS_IPHONE
     snprintf(avail, sizeof avail, "%llu MB", (unsigned long long)(os_proc_available_memory() >> 20));
 #endif
-    MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u (%u of them unreferenced; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total (%llu MB; segments cut for scratch %llu, waits for a block %llu), finalized textures still referenced %u (small table, %llu put in total, %llu held to the end of their submission past it, %llu resolved to shared textures without it); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, aorph, (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, (unsigned long long)(arena_bytes() >> 20), (unsigned long long)g_arena_cuts, (unsigned long long)arena_waits(), nghost, (unsigned long long)ghost_puts, (unsigned long long)ghost_kept, (unsigned long long)ghost_shared, avail);
+    MLOG("memory up to frame %llu: resident %llu MB, GPU allocated %llu MB, deferred-release queue %lu, residency set %lu, serial objects %u, memory pools %d (resident %d; peak %d / tracking table capacity %d; freed but alive %lu, %llu MB), shared textures %u, %llu MB (%u of them unreferenced, %llu MB, GPU-written %llu MB; textures by serial %llu MB; evicted with pools %llu, on storage takeover %llu in total), texture re-uploads %llu in total, per-frame arena blocks created %llu in total (%llu MB; segments cut for scratch %llu, waits for a block %llu), finalized textures still referenced %u (small table, %llu put in total, %llu held to the end of their submission past it, %llu resolved to shared textures without it); headroom to the system memory limit %s", frame, rss_mb, gpu, nd, nr, ns, live, pres, peak, cap, dead_n, dead_mb, ashared, (unsigned long long)(ash_b >> 20), aorph, (unsigned long long)(aorph_b >> 20), (unsigned long long)(aorph_w >> 20), (unsigned long long)(ser_b >> 20), (unsigned long long)g_alias_evicted, (unsigned long long)g_alias_taken, (unsigned long long)g_pkg_reuploads, (unsigned long long)g_arena_made, (unsigned long long)(arena_bytes() >> 20), (unsigned long long)g_arena_cuts, (unsigned long long)arena_waits(), nghost, (unsigned long long)ghost_puts, (unsigned long long)ghost_kept, (unsigned long long)ghost_shared, avail);
     {   // What the memory pools put in the residency set (on a phone: wired), and the uploads read from pools that hold only textures without putting them there (up_tex_src)
         uint64_t pall = 0, pres_b = 0; int pn = 0;
         pthread_mutex_lock(&g_mu); for (int i = 0; i < g_npool; i++) { uint64_t sz = g_pools[i].hi - g_pools[i].lo; pall += sz; if (g_pools[i].res) pres_b += sz; } pn = g_npool; pthread_mutex_unlock(&g_mu);
