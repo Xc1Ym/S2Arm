@@ -267,6 +267,43 @@ class DownloadTests(Base):
         self.get()
         self.assertEqual(self.target.read_bytes(), FlakyHandler.body)
 
+    def test_completed_download_retries_promotion_without_another_request(self):
+        real, attempts = os.replace, []
+
+        def locked(source, target):
+            attempts.append((source, target))
+            if len(attempts) < 3:
+                raise PermissionError(13, "synthetic sharing violation")
+            return real(source, target)
+
+        FlakyHandler.plan = [(None, True)]
+        with patch.object(updater.os, "replace", locked), patch.object(updater.time, "sleep"):
+            self.get()
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(FlakyHandler.ranges, [0])
+        self.assertEqual(self.target.read_bytes(), FlakyHandler.body)
+        self.assertFalse(Path(str(self.target) + ".part").exists())
+
+    def test_promotion_timeout_keeps_complete_part_for_the_next_attempt(self):
+        FlakyHandler.plan = [(None, True)]
+        with patch.object(updater.os, "replace", side_effect=PermissionError(13, "synthetic sharing violation")) as replace, \
+                patch.object(updater.time, "monotonic", side_effect=[0, 1, 31]), patch.object(updater.time, "sleep"), \
+                self.assertRaises(PermissionError):
+            self.get()
+        self.assertEqual(replace.call_count, 2)
+        self.assertFalse(self.target.exists())
+        self.assertEqual(Path(str(self.target) + ".part").read_bytes(), FlakyHandler.body)
+        self.get()
+        self.assertEqual(self.target.read_bytes(), FlakyHandler.body)
+        self.assertEqual(FlakyHandler.ranges, [0])
+
+    def test_completed_part_can_replace_an_existing_target(self):
+        self.target.write_bytes(b"stale package")
+        Path(str(self.target) + ".part").write_bytes(FlakyHandler.body)
+        self.get()
+        self.assertEqual(self.target.read_bytes(), FlakyHandler.body)
+        self.assertEqual(FlakyHandler.ranges, [])
+
 
 class MacUnpackTests(Base):
     def test_failed_attach_reports_why_and_mounts_outside_the_data_folder(self):
@@ -469,6 +506,30 @@ class PrepareTests(Base):
         self.assertEqual(caught.exception.code, "update_checksum_mismatch")
         self.assertEqual(tree(self.install), before)
         self.assertFalse(list((self.private / "updates").rglob("S2Arm-windows-x64.zip")))
+
+    def test_promotion_retry_still_verifies_the_signed_checksum(self):
+        real = os.replace
+        for valid in (True, False):
+            with self.subTest(valid=valid):
+                self.publish(hashlib.sha256(self.zip).hexdigest() if valid else "0" * 64)
+                before, attempts = tree(self.install), []
+
+                def locked(source, target):
+                    if str(source).endswith(".zip.part"):
+                        attempts.append(source)
+                        if len(attempts) == 1:
+                            raise PermissionError(13, "synthetic sharing violation")
+                    return real(source, target)
+
+                with patch.object(updater.os, "replace", locked), patch.object(updater.time, "sleep"):
+                    if valid:
+                        self.assertEqual(self.prepare()["state"], "ready")
+                    else:
+                        with self.assertRaises(updater.UpdateError) as caught:
+                            self.prepare()
+                        self.assertEqual(caught.exception.code, "update_checksum_mismatch")
+                self.assertEqual(len(attempts), 2)
+                self.assertEqual(tree(self.install), before)
 
     def test_runs_the_way_the_launcher_starts_it(self):
         """两端都用 python -I 直接跑 updater.py：同目录的模块要自己能找到。"""

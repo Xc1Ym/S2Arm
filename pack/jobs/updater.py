@@ -271,7 +271,8 @@ def download(url, target, size):
             why = network_error(failure, "下载新版").detail if failure else "连接提前结束"
             raise UpdateError("update_download_failed", "下载一直断开，已停止，当前版本没有变化。请检查网络后重试，或打开下载页手动下载。", why)
         time.sleep(RETRY_SECONDS * stalled)
-    part.replace(target)
+    # 已下完且文件句柄已关闭；Windows 扫描器可能仍短暂占用它，只重试落盘，不重新下载。
+    retry_rename(part, target, replace=True)
 
 
 def extract_windows(package, dest):
@@ -511,12 +512,12 @@ def remove_tree(path):
     shutil.rmtree(path, onerror=writable)
 
 
-def retry_rename(source, target, seconds=30):
-    """Windows 上杀毒软件和索引服务会短暂占住目录：重试几十秒再放弃。"""
+def retry_rename(source, target, seconds=30, *, replace=False):
+    """Windows 上杀毒软件和索引服务会短暂占住文件 / 目录：重试几十秒再放弃。"""
     deadline = time.monotonic() + seconds
     while True:
         try:
-            os.rename(source, target)
+            (os.replace if replace else os.rename)(source, target)
             return
         except OSError:
             if time.monotonic() >= deadline:
